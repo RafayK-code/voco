@@ -2,7 +2,14 @@
 #include <vulkan/vulkan.h>
 #include <vma/vk_mem_alloc.h>
 #include <cstdint>
-#include "utils.h"
+
+#define VOCO_ENUM_CLASS_FLAG_OPERATORS(T)                                                           \
+    inline constexpr T operator|(T a, T b) { return T(int(a) | int(b)); }                   \
+    inline constexpr T operator&(T a, T b) { return T(int(a) & int(b)); }                   \
+    inline constexpr T operator~(T a) { return T(~int(a)); }                           \
+    inline constexpr bool operator!(T a) { return int(a) == 0; }                          \
+    inline constexpr bool operator==(T a, int b) { return int(a) == b; }                          \
+    inline constexpr bool operator!=(T a, int b) { return int(a) != b; }
 
 namespace voco 
 {
@@ -51,5 +58,12 @@ namespace voco
         Read,
         Write,
         ReadWrite,
+    };
+
+    enum class ShaderSourceType
+    {
+        SPIRV,
+        GLSL,
+        HLSL,
     };
 } // namespace voco
