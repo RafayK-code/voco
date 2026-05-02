@@ -6,6 +6,8 @@
 
 namespace voco
 {
+    namespace detail { class RetirementQueue; }
+
     class ComputePipeline
     {
     public:
@@ -28,6 +30,9 @@ namespace voco
         ComputePipeline() = default;
 
         VkDevice m_device = VK_NULL_HANDLE;
+        detail::RetirementQueue* m_retirementQueue = nullptr;
+        uint64_t m_lastSubmissionID = 0;
+
         VkShaderModule m_shaderModule = VK_NULL_HANDLE;
         std::vector<VkDescriptorSetLayout> m_descSetLayouts;
         VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;

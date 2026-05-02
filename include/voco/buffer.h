@@ -2,9 +2,14 @@
 #include <vulkan/vulkan.h>
 #include <vma/vk_mem_alloc.h>
 #include "types.h"
+#include <cstdint>
 
 namespace voco
 {
+    class Device;
+
+    namespace detail { class RetirementQueue; }
+
     class Buffer
     {
     public:
@@ -26,14 +31,20 @@ namespace voco
         friend class Device;
         friend class CommandList;
 
-        Buffer() = default;
+        Buffer(VmaAllocator allocator, detail::RetirementQueue* retirementQueue, VkBuffer buffer,
+               VmaAllocation allocation, VkDeviceSize size, BufferUsage usage, MemoryType memType);
+
+        detail::RetirementQueue* m_retirementQueue = nullptr;
+        VmaAllocator m_allocator = VK_NULL_HANDLE;
 
         VkBuffer m_buffer = VK_NULL_HANDLE;
         VmaAllocation m_allocation = VK_NULL_HANDLE;
         VkDeviceSize m_size = 0;
 
-        BufferUsage m_usage = 0;
+        BufferUsage m_usage = BufferUsage::None;
         MemoryType m_memoryType = MemoryType::Device;
+
+        uint64_t m_lastSubmissionID = 0;
 
         VkPipelineStageFlags2 m_lastStage = VK_PIPELINE_STAGE_2_NONE;
         VkAccessFlags2 m_lastAccess = VK_ACCESS_2_NONE;

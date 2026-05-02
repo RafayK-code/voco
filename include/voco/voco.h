@@ -1,6 +1,5 @@
 #pragma once
 #include "context.h"
-#include "utils.h"
 #include "types.h"
 #include "buffer.h"
 #include "image.h"

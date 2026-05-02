@@ -7,18 +7,16 @@
 #include "buffer.h"
 #include "pipeline.h"
 #include "command_list.h"
+#include "future.h"
 
 namespace voco
 {
-    struct TransferHandle
+    namespace detail
     {
-        void wait();
-
-    private:
-        friend class Device;
-        VkFence m_fence = VK_NULL_HANDLE;
-        VkDevice m_device = VK_NULL_HANDLE;
-    };
+        class Queue;
+        class RetirementQueue;
+        class DescriptorLayoutCache;
+    }
 
     class Device
     {
@@ -31,28 +29,33 @@ namespace voco
 
         Buffer createBuffer(BufferUsage usage, VkDeviceSize size, MemoryType memType = MemoryType::Device);
 
-        void copyToDevice(const void* src, Buffer& dst, VkDeviceSize size);
-        TransferHandle copyToDeviceAsync(const void* src, Buffer& dst, VkDeviceSize size);
+        void copyToDevice(const void* src, Buffer& dst, VkDeviceSize offset, VkDeviceSize size);
+        Future copyToDeviceAsync(const void* src, Buffer& dst, VkDeviceSize offset, VkDeviceSize size);
 
-        void copyToHost(const Buffer& src, void* dst, VkDeviceSize size);
-        TransferHandle copyToHostAsync(const Buffer& src, void* dst, VkDeviceSize size);
+        void copyToHost(Buffer& src, void* dst, VkDeviceSize srcOffset, VkDeviceSize size);
+        Future copyToHostAsync(Buffer& src, void* dst, VkDeviceSize srcOffset, VkDeviceSize size);
 
-        ComputePipeline createComputePipeline(std::string_view shaderPath);
+        ComputePipeline createComputePipeline(std::string_view shaderPath, ShaderSourceType sourceType = ShaderSourceType::SPIRV);
         CommandList createCommandList();
         void submit(CommandList& cmd);
 
     private:
-        void copyToDeviceMapped(const void*, VkBuffer, VmaAllocation, VkDeviceSize);
-        void copyToDeviceStaged(const void*, VkBuffer, VkDeviceSize);
-        void copyToHostMapped(VkBuffer, VmaAllocation, void*, VkDeviceSize);
-        void copyToHostStaged(VkBuffer, void*, VkDeviceSize);
+        void copyToDeviceMapped(const void* src, VkBuffer dst, VmaAllocation allocation, VkDeviceSize dstOffset, VkDeviceSize size);
+        void copyToDeviceStaged(const void* src, VkBuffer dst, VkDeviceSize dstOffset, VkDeviceSize size);
+        void copyToHostMapped(VkBuffer src, VmaAllocation allocation, void* dst, VkDeviceSize srcOffset, VkDeviceSize size);
+        void copyToHostStaged(VkBuffer src, void* dst, VkDeviceSize srcOffset, VkDeviceSize size);
 
-        TransferHandle copyToDeviceMappedAsync(const void*, VkBuffer, VmaAllocation, VkDeviceSize);
-        TransferHandle copyToDeviceStagedAsync(const void*, VkBuffer, VkDeviceSize);
-        TransferHandle copyToHostMappedAsync(VkBuffer, VmaAllocation, void*, VkDeviceSize);
-        TransferHandle copyToHostStagedAsync(VkBuffer, void*, VkDeviceSize);
+        Future copyToDeviceMappedAsync(const void* src, VkBuffer dst, VmaAllocation allocation, VkDeviceSize dstOffset, VkDeviceSize size);
+        Future copyToDeviceStagedAsync(const void* src, VkBuffer dst, VkDeviceSize dstOffset, VkDeviceSize size);
+        Future copyToHostMappedAsync(VkBuffer src, VmaAllocation allocation, void* dst, VkDeviceSize srcOffset, VkDeviceSize size);
+        Future copyToHostStagedAsync(VkBuffer src, void* dst, VkDeviceSize srcOffset, VkDeviceSize size);
 
-        struct Impl;
-        std::unique_ptr<Impl> m_impl;
+        Context m_ctx;
+        VmaAllocator m_allocator = VK_NULL_HANDLE;
+        VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
+
+        std::unique_ptr<detail::Queue> m_queue;
+        std::unique_ptr<detail::RetirementQueue> m_retirementQueue;
+        std::unique_ptr<detail::DescriptorLayoutCache> m_descriptorLayoutCache;
     };
 } // namespace voco
