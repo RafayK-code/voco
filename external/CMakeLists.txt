@@ -3,3 +3,4 @@ project(external)
 
 add_subdirectory(vma)
 add_subdirectory(spirv-reflect)
+add_subdirectory(doctest)
