@@ -5,6 +5,7 @@
 #include "utils.h"
 #include <spirv-reflect/spirv_reflect.h>
 #include <fstream>
+#include <sstream>
 #ifdef VOCO_ENABLE_GLSL
 #include <shaderc/shaderc.hpp>
 #endif
@@ -85,7 +86,7 @@ namespace voco
 
         if (sourceType == ShaderSourceType::SPIRV)
         {
-            std::ifstream file(std::string(shaderPath), std::ios::binary | std::ios::ate);
+            std::ifstream file(std::string{shaderPath}, std::ios::binary | std::ios::ate);
             size_t byteSize = static_cast<size_t>(file.tellg());
             file.seekg(0);
             spirv.resize(byteSize / sizeof(uint32_t));
@@ -94,8 +95,10 @@ namespace voco
         else if (sourceType == ShaderSourceType::GLSL)
         {
 #ifdef VOCO_ENABLE_GLSL
-            std::ifstream file(std::string(shaderPath));
-            std::string source((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            std::ifstream file(std::string{shaderPath});
+            std::ostringstream ss;
+            ss << file.rdbuf();
+            std::string source = ss.str();
 
             shaderc::Compiler compiler;
             shaderc::CompileOptions options;
@@ -104,7 +107,7 @@ namespace voco
             shaderc::SpvCompilationResult result = compiler.CompileGlslToSpv(
                 source.c_str(), source.size(),
                 shaderc_glsl_compute_shader,
-                std::string(shaderPath).c_str(),
+                std::string{shaderPath}.c_str(),
                 "main", options);
 
             DEBUG_ASSERT(result.GetCompilationStatus() == shaderc_compilation_status_success,
