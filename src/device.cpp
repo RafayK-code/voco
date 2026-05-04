@@ -38,14 +38,16 @@ namespace voco
         vkCreateDescriptorPool(m_ctx.device, &poolInfo, nullptr, &m_descriptorPool);
 
         m_queue = std::make_unique<detail::Queue>(m_ctx.device, m_ctx.computeQueue, m_ctx.computeQueueFamilyIndex);
-        m_retirementQueue = std::make_unique<detail::RetirementQueue>(*m_queue);
         m_descriptorLayoutCache = std::make_unique<detail::DescriptorLayoutCache>(m_ctx.device, m_descriptorPool);
+        m_pipelineLayoutCache = std::make_unique<detail::PipelineLayoutCache>(m_ctx.device, *m_descriptorLayoutCache);
+        m_retirementQueue = std::make_unique<detail::RetirementQueue>(*m_queue);
     }
 
     Device::~Device()
     {
-        m_descriptorLayoutCache.reset();
         m_retirementQueue.reset();
+        m_pipelineLayoutCache.reset();
+        m_descriptorLayoutCache.reset();
         m_queue.reset();
 
         vkDestroyDescriptorPool(m_ctx.device, m_descriptorPool, nullptr);
@@ -142,8 +144,7 @@ namespace voco
         uint32_t totalSets = setCount > 0 ? maxSet + 1 : 0;
 
         std::vector<VkDescriptorSetLayout> setLayouts(totalSets);
-        for (uint32_t i = 0; i < totalSets; ++i)
-            setLayouts[i] = m_descriptorLayoutCache->getOrCreate({}).layout;
+        std::vector<std::vector<detail::BindingDesc>> allBindings(totalSets);
 
         for (auto* reflSet : reflSets)
         {
@@ -158,6 +159,7 @@ namespace voco
                 });
             }
             setLayouts[reflSet->set] = m_descriptorLayoutCache->getOrCreate(bindings).layout;
+            allBindings[reflSet->set] = std::move(bindings);
         }
 
         uint32_t pushConstSize = 0;
@@ -171,15 +173,8 @@ namespace voco
         pcRange.offset = 0;
         pcRange.size = pushConstSize;
 
-        VkPipelineLayoutCreateInfo layoutInfo{};
-        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        layoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
-        layoutInfo.pSetLayouts = setLayouts.data();
-        layoutInfo.pushConstantRangeCount = pushConstSize > 0 ? 1 : 0;
-        layoutInfo.pPushConstantRanges = pushConstSize > 0 ? &pcRange : nullptr;
-
-        VkPipelineLayout pipelineLayout;
-        VK_CHECK(vkCreatePipelineLayout(m_ctx.device, &layoutInfo, nullptr, &pipelineLayout));
+        VkPipelineLayout pipelineLayout = m_pipelineLayoutCache->getOrCreate(
+            allBindings, pushConstSize > 0 ? std::optional(pcRange) : std::nullopt);
 
         VkShaderModuleCreateInfo shaderInfo{};
         shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;

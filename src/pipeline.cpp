@@ -15,7 +15,6 @@ namespace voco
 
         m_retirementQueue->push({ m_lastSubmissionID, [device, shaderModule, layout, pipeline]() {
             vkDestroyShaderModule(device, shaderModule, nullptr);
-            vkDestroyPipelineLayout(device, layout, nullptr);
             vkDestroyPipeline(device, pipeline, nullptr);
         }});
     }

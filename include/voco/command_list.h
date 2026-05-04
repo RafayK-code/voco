@@ -61,7 +61,15 @@ namespace voco
             Access access;
         };
 
+        struct PendingSet
+        {
+            struct LayoutBinding { uint32_t binding; VkDescriptorType type; };
+            std::vector<LayoutBinding>              layoutKey;
+            std::vector<std::pair<uint32_t, VkBuffer>> setKey;
+            std::vector<uint32_t>                   bufferIndices;
+        };
+
         std::vector<BoundBuffer> m_boundBuffers;
-        std::unordered_map<uint32_t, std::vector<uint32_t>> m_setIndices;
+        std::unordered_map<uint32_t, PendingSet> m_pendingSets;
     };
 } // namespace voco

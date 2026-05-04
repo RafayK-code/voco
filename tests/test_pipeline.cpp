@@ -56,6 +56,16 @@ TEST_CASE("pipeline creation")
 {
     CHECK(scalePipeline().valid());
     CHECK(inplaceAddPipeline().valid());
+    CHECK(uniformPipeline().valid());
+    CHECK(multisetPipeline().valid());
+}
+
+TEST_CASE("pipeline layout deduplication")
+{
+    auto& dev = g_ctx->device();
+    ComputePipeline p1 = dev.createComputePipeline(SHADER("test_scale.glsl"), ShaderSourceType::GLSL);
+    ComputePipeline p2 = dev.createComputePipeline(SHADER("test_scale.glsl"), ShaderSourceType::GLSL);
+    CHECK(p1.pipelineLayout() == p2.pipelineLayout());
 }
 
 TEST_CASE("basic dispatch")

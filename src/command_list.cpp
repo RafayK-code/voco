@@ -29,13 +29,13 @@ namespace voco
     void CommandList::bindBuffer(uint32_t set, uint32_t binding, Buffer& buffer, Access access)
     {
         uint32_t index = static_cast<uint32_t>(m_boundBuffers.size());
-        m_boundBuffers.push_back({
-            .set = set,
-            .binding = binding,
-            .buffer = &buffer,
-            .access = access
-        });
-        m_setIndices[set].push_back(index);
+        m_boundBuffers.push_back({ .set = set, .binding = binding, .buffer = &buffer, .access = access });
+
+        bool isUniform = static_cast<int>(buffer.m_usage & BufferUsage::Uniform) != 0;
+        auto& pending = m_pendingSets[set];
+        pending.layoutKey.push_back({ binding, isUniform ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER });
+        pending.setKey.push_back({ binding, buffer.handle() });
+        pending.bufferIndices.push_back(index);
     }
 
     void CommandList::dispatch(uint32_t x, uint32_t y, uint32_t z)
@@ -43,9 +43,9 @@ namespace voco
         DEBUG_ASSERT(m_pipeline, "attempted to dispatch before binding pipeline");
 
         bool needsBarrier = false;
-        for (auto& [set, indices] : m_setIndices)
+        for (auto& [set, pending] : m_pendingSets)
         {
-            for (uint32_t idx : indices)
+            for (uint32_t idx : pending.bufferIndices)
             {
                 if (m_boundBuffers[idx].buffer->m_lastAccess & VK_ACCESS_2_SHADER_WRITE_BIT)
                 {
@@ -73,27 +73,15 @@ namespace voco
             vkCmdPipelineBarrier2(m_cmdBuf->cmd, &depInfo);
         }
 
-        for (auto& [set, indices] : m_setIndices)
+        for (auto& [set, pending] : m_pendingSets)
         {
             std::vector<detail::BindingDesc> bindings;
-            bindings.reserve(indices.size());
+            bindings.reserve(pending.layoutKey.size());
+            for (auto& lb : pending.layoutKey)
+                bindings.push_back({ lb.binding, lb.type, VK_SHADER_STAGE_COMPUTE_BIT });
 
             detail::DescriptorSetKey setKey;
-            setKey.bindings.reserve(indices.size());
-
-            for (uint32_t idx : indices)
-            {
-                BoundBuffer& bb = m_boundBuffers[idx];
-                bool isUniform = static_cast<int>(bb.buffer->m_usage & BufferUsage::Uniform) != 0;
-
-                bindings.push_back({
-                    .binding = bb.binding,
-                    .type = isUniform ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .stages = VK_SHADER_STAGE_COMPUTE_BIT
-                });
-
-                setKey.bindings.push_back({ bb.binding, bb.buffer->handle() });
-            }
+            setKey.bindings = pending.setKey;
 
             detail::DescriptorLayout& descLayout = m_layoutCache->getOrCreate(bindings);
 
@@ -108,12 +96,12 @@ namespace voco
             if (needsWrite)
             {
                 std::vector<VkDescriptorBufferInfo> bufferInfos;
-                bufferInfos.reserve(indices.size());
+                bufferInfos.reserve(pending.bufferIndices.size());
 
                 std::vector<VkWriteDescriptorSet> writes;
-                writes.reserve(indices.size());
+                writes.reserve(pending.bufferIndices.size());
 
-                for (uint32_t idx : indices)
+                for (uint32_t idx : pending.bufferIndices)
                 {
                     BoundBuffer& bb = m_boundBuffers[idx];
                     bool isUniform = static_cast<int>(bb.buffer->m_usage & BufferUsage::Uniform) != 0;
@@ -140,9 +128,9 @@ namespace voco
 
         vkCmdDispatch(m_cmdBuf->cmd, x, y, z);
 
-        for (auto& [set, indices] : m_setIndices)
+        for (auto& [set, pending] : m_pendingSets)
         {
-            for (uint32_t idx : indices)
+            for (uint32_t idx : pending.bufferIndices)
             {
                 BoundBuffer& bb = m_boundBuffers[idx];
                 bb.buffer->m_lastAccess = detail::ConvertAccessToVulkanAccessFlags2(bb.access);
@@ -150,7 +138,7 @@ namespace voco
             }
         }
 
-        m_setIndices.clear();
+        m_pendingSets.clear();
     }
 
     void CommandList::setPushConstantsImpl(const void* data, uint32_t size)

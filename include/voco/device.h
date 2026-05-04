@@ -16,6 +16,7 @@ namespace voco
         class Queue;
         class RetirementQueue;
         class DescriptorLayoutCache;
+        class PipelineLayoutCache;
     }
 
     class Device
@@ -55,7 +56,8 @@ namespace voco
         VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
 
         std::unique_ptr<detail::Queue> m_queue;
-        std::unique_ptr<detail::RetirementQueue> m_retirementQueue;
         std::unique_ptr<detail::DescriptorLayoutCache> m_descriptorLayoutCache;
+        std::unique_ptr<detail::PipelineLayoutCache> m_pipelineLayoutCache;
+        std::unique_ptr<detail::RetirementQueue> m_retirementQueue;
     };
 } // namespace voco

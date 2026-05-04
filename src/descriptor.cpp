@@ -64,7 +64,7 @@ namespace voco::detail
         return bindings == other.bindings;
     }
 
-    size_t DescriptorSetKeyHash::operator()(const DescriptorSetKey& key) const
+    size_t DescriptorSetCache::Hash::operator()(const DescriptorSetKey& key) const
     {
         size_t h = key.bindings.size();
         for (const auto& [binding, buffer] : key.bindings)
@@ -123,5 +123,79 @@ namespace voco::detail
                 return;
             }
         }
+    }
+
+    bool PipelineLayoutKey::operator==(const PipelineLayoutKey& other) const
+    {
+        if (setLayouts != other.setLayouts)
+            return false;
+        if (pushConstant.has_value() != other.pushConstant.has_value())
+            return false;
+        if (pushConstant.has_value())
+        {
+            const auto& a = *pushConstant;
+            const auto& b = *other.pushConstant;
+            return a.stageFlags == b.stageFlags && a.offset == b.offset && a.size == b.size;
+        }
+        return true;
+    }
+
+    size_t PipelineLayoutCache::Hash::operator()(const PipelineLayoutKey& key) const
+    {
+        BindingDescVectorHash setHash;
+        size_t h = key.setLayouts.size();
+        for (const auto& set : key.setLayouts)
+            h ^= setHash(set) + 0x9e3779b9 + (h << 6) + (h >> 2);
+
+        if (key.pushConstant)
+        {
+            h ^= std::hash<uint32_t>{}(key.pushConstant->stageFlags) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<uint32_t>{}(key.pushConstant->offset)     + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<uint32_t>{}(key.pushConstant->size)       + 0x9e3779b9 + (h << 6) + (h >> 2);
+        }
+        return h;
+    }
+
+    PipelineLayoutCache::PipelineLayoutCache(VkDevice device, DescriptorLayoutCache& descriptorCache)
+        : m_device(device)
+        , m_descriptorCache(descriptorCache)
+    {}
+
+    PipelineLayoutCache::~PipelineLayoutCache()
+    {
+        for (auto& [key, layout] : m_cache)
+            vkDestroyPipelineLayout(m_device, layout, nullptr);
+    }
+
+    VkPipelineLayout PipelineLayoutCache::getOrCreate(const std::vector<std::vector<BindingDesc>>& setLayouts,
+                                                      const std::optional<VkPushConstantRange>& pushConstant)
+    {
+        PipelineLayoutKey key{ setLayouts, pushConstant };
+
+        auto it = m_cache.find(key);
+        if (it != m_cache.end())
+            return it->second;
+
+        std::vector<VkDescriptorSetLayout> vkLayouts;
+        vkLayouts.reserve(setLayouts.size());
+        for (const auto& bindings : setLayouts)
+            vkLayouts.push_back(m_descriptorCache.getOrCreate(bindings).layout);
+
+        VkPipelineLayoutCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        info.setLayoutCount = static_cast<uint32_t>(vkLayouts.size());
+        info.pSetLayouts = vkLayouts.data();
+
+        if (pushConstant)
+        {
+            info.pushConstantRangeCount = 1;
+            info.pPushConstantRanges = &*pushConstant;
+        }
+
+        VkPipelineLayout layout;
+        VK_CHECK(vkCreatePipelineLayout(m_device, &info, nullptr, &layout));
+
+        m_cache.emplace(std::move(key), layout);
+        return layout;
     }
 }

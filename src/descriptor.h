@@ -2,6 +2,7 @@
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <unordered_map>
+#include <optional>
 #include <cstdint>
 
 namespace voco::detail
@@ -30,11 +31,6 @@ namespace voco::detail
         bool operator==(const DescriptorSetKey& other) const;
     };
 
-    struct DescriptorSetKeyHash
-    {
-        size_t operator()(const DescriptorSetKey& key) const;
-    };
-
     struct CachedDescriptorSet
     {
         VkDescriptorSet set = VK_NULL_HANDLE;
@@ -59,11 +55,16 @@ namespace voco::detail
         void markSubmitted(const DescriptorSetKey& key, uint64_t submissionID);
 
     private:
+        struct Hash
+        {
+            size_t operator()(const DescriptorSetKey& key) const;
+        };
+
         VkDevice m_device = VK_NULL_HANDLE;
         VkDescriptorPool m_pool = VK_NULL_HANDLE;
         VkDescriptorSetLayout m_layout = VK_NULL_HANDLE;
 
-        std::unordered_map<DescriptorSetKey, std::vector<CachedDescriptorSet>, DescriptorSetKeyHash> m_cache;
+        std::unordered_map<DescriptorSetKey, std::vector<CachedDescriptorSet>, Hash> m_cache;
     };
 
     struct DescriptorLayout
@@ -87,5 +88,36 @@ namespace voco::detail
         VkDevice m_device = VK_NULL_HANDLE;
         VkDescriptorPool m_pool = VK_NULL_HANDLE;
         std::unordered_map<std::vector<BindingDesc>, DescriptorLayout, BindingDescVectorHash> m_cache;
+    };
+
+    struct PipelineLayoutKey
+    {
+        std::vector<std::vector<BindingDesc>> setLayouts;
+        std::optional<VkPushConstantRange> pushConstant;
+
+        bool operator==(const PipelineLayoutKey& other) const;
+    };
+
+    class PipelineLayoutCache
+    {
+    public:
+        PipelineLayoutCache(VkDevice device, DescriptorLayoutCache& descriptorCache);
+        ~PipelineLayoutCache();
+
+        PipelineLayoutCache(const PipelineLayoutCache&) = delete;
+        PipelineLayoutCache& operator=(const PipelineLayoutCache&) = delete;
+
+        VkPipelineLayout getOrCreate(const std::vector<std::vector<BindingDesc>>& setLayouts,
+                                     const std::optional<VkPushConstantRange>& pushConstant);
+
+    private:
+        struct Hash
+        {
+            size_t operator()(const PipelineLayoutKey& key) const;
+        };
+
+        VkDevice m_device = VK_NULL_HANDLE;
+        DescriptorLayoutCache& m_descriptorCache;
+        std::unordered_map<PipelineLayoutKey, VkPipelineLayout, Hash> m_cache;
     };
 }
