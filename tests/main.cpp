@@ -1,7 +1,6 @@
 #include <doctest/doctest.h>
 #include "test_context.h"
-
-void cleanupTestPipelines();
+#include "test_pipelines.h"
 
 int main(int argc, char** argv)
 {

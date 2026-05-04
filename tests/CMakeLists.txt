@@ -3,6 +3,7 @@ add_executable(voco_tests
     test_context.cpp
     test_buffer.cpp
     test_pipeline.cpp
+    test_sync.cpp
 )
 
 target_link_libraries(voco_tests
