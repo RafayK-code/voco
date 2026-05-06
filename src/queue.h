@@ -47,7 +47,6 @@ namespace voco::detail
         VkSemaphore m_timelineSemaphore = VK_NULL_HANDLE;
 
         uint64_t m_lastSubmittedID = 0;
-        uint64_t m_lastFinishedID = 0;
 
         std::list<TrackedCommandBuffer> m_inFlight;
         std::list<TrackedCommandBuffer> m_pool;

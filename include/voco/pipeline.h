@@ -29,6 +29,8 @@ namespace voco
 
         ComputePipeline() = default;
 
+        void destroy();
+
         VkDevice m_device = VK_NULL_HANDLE;
         detail::RetirementQueue* m_retirementQueue = nullptr;
         uint64_t m_lastSubmissionID = 0;

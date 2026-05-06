@@ -13,6 +13,8 @@ namespace voco
     {
         struct TrackedCommandBuffer;
         class DescriptorLayoutCache;
+        class DescriptorSetCache;
+        class BufferRegistry;
     }
 
     class CommandList
@@ -41,17 +43,20 @@ namespace voco
         friend class Device;
 
         CommandList(VkDevice device, detail::TrackedCommandBuffer cmdBuf,
-                    detail::DescriptorLayoutCache* layoutCache, uint64_t lastFinishedID);
+                    detail::DescriptorLayoutCache* layoutCache, detail::BufferRegistry* bufferRegistry,
+                    uint64_t lastFinishedID);
 
         void setPushConstantsImpl(const void* data, uint32_t size);
 
         VkDevice m_device = VK_NULL_HANDLE;
         detail::DescriptorLayoutCache* m_layoutCache = nullptr;
+        detail::BufferRegistry* m_bufferRegistry = nullptr;
         uint64_t m_lastFinishedID = 0;
 
         std::unique_ptr<detail::TrackedCommandBuffer> m_cmdBuf;
 
         ComputePipeline* m_pipeline = nullptr;
+        std::vector<ComputePipeline*> m_boundPipelines;
 
         struct BoundBuffer
         {
@@ -61,15 +66,26 @@ namespace voco
             Access access;
         };
 
+        struct PendingBinding
+        {
+            uint32_t binding = 0;
+            uint32_t bufferIndex = 0;
+            VkDescriptorType type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        };
+
         struct PendingSet
         {
-            struct LayoutBinding { uint32_t binding; VkDescriptorType type; };
-            std::vector<LayoutBinding>              layoutKey;
-            std::vector<std::pair<uint32_t, VkBuffer>> setKey;
-            std::vector<uint32_t>                   bufferIndices;
+            std::unordered_map<uint32_t, PendingBinding> bindings;
+        };
+
+        struct UsedSet
+        {
+            detail::DescriptorSetCache* cache;
+            std::vector<std::pair<uint32_t, VkBuffer>> key;
         };
 
         std::vector<BoundBuffer> m_boundBuffers;
         std::unordered_map<uint32_t, PendingSet> m_pendingSets;
+        std::vector<UsedSet> m_usedSets;
     };
 } // namespace voco

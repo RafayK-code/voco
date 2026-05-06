@@ -1,11 +1,14 @@
 #include <voco/buffer.h>
 #include "retirement_queue.h"
+#include "buffer_registry.h"
 
 namespace voco
 {
-    Buffer::Buffer(VmaAllocator allocator, detail::RetirementQueue* retirementQueue, VkBuffer buffer,
+    Buffer::Buffer(VmaAllocator allocator, detail::RetirementQueue* retirementQueue,
+                   detail::BufferRegistry* bufferRegistry, VkBuffer buffer,
                    VmaAllocation allocation, VkDeviceSize size, BufferUsage usage, MemoryType memType)
         : m_retirementQueue(retirementQueue)
+        , m_bufferRegistry(bufferRegistry)
         , m_allocator(allocator)
         , m_buffer(buffer)
         , m_allocation(allocation)
@@ -16,25 +19,12 @@ namespace voco
 
     Buffer::~Buffer()
     {
-        if (m_buffer == VK_NULL_HANDLE)
-            return;
-
-        if (m_lastSubmissionID == 0 || m_retirementQueue == nullptr)
-        {
-            vmaDestroyBuffer(m_allocator, m_buffer, m_allocation);
-            return;
-        }
-
-        m_retirementQueue->push({
-            .submissionID = m_lastSubmissionID,
-            .destroy = [allocator = m_allocator, buffer = m_buffer, allocation = m_allocation]() {
-                vmaDestroyBuffer(allocator, buffer, allocation);
-            }
-        });
+        destroy();
     }
 
     Buffer::Buffer(Buffer&& other) noexcept
         : m_retirementQueue(other.m_retirementQueue)
+        , m_bufferRegistry(other.m_bufferRegistry)
         , m_allocator(other.m_allocator)
         , m_buffer(other.m_buffer)
         , m_allocation(other.m_allocation)
@@ -48,6 +38,7 @@ namespace voco
         other.m_buffer = VK_NULL_HANDLE;
         other.m_allocation = VK_NULL_HANDLE;
         other.m_retirementQueue = nullptr;
+        other.m_bufferRegistry = nullptr;
         other.m_allocator = VK_NULL_HANDLE;
     }
 
@@ -56,9 +47,10 @@ namespace voco
         if (this == &other)
             return *this;
 
-        this->~Buffer();
+        destroy();
 
         m_retirementQueue = other.m_retirementQueue;
+        m_bufferRegistry = other.m_bufferRegistry;
         m_allocator = other.m_allocator;
         m_buffer = other.m_buffer;
         m_allocation = other.m_allocation;
@@ -72,8 +64,38 @@ namespace voco
         other.m_buffer = VK_NULL_HANDLE;
         other.m_allocation = VK_NULL_HANDLE;
         other.m_retirementQueue = nullptr;
+        other.m_bufferRegistry = nullptr;
         other.m_allocator = VK_NULL_HANDLE;
 
         return *this;
+    }
+
+    void Buffer::destroy()
+    {
+        if (m_buffer == VK_NULL_HANDLE)
+            return;
+
+        VkBuffer buffer = m_buffer;
+        VmaAllocation allocation = m_allocation;
+        VmaAllocator allocator = m_allocator;
+
+        m_buffer = VK_NULL_HANDLE;
+        m_allocation = VK_NULL_HANDLE;
+        m_allocator = VK_NULL_HANDLE;
+
+        uint64_t descriptorMaxSubmissionID = 0;
+        if (m_bufferRegistry)
+            descriptorMaxSubmissionID = m_bufferRegistry->onBufferDestroyed(buffer);
+
+        uint64_t lastSubmissionID = std::max(m_lastSubmissionID, descriptorMaxSubmissionID);
+        if (lastSubmissionID == 0 || m_retirementQueue == nullptr)
+        {
+            vmaDestroyBuffer(allocator, buffer, allocation);
+            return;
+        }
+
+        m_retirementQueue->push({ lastSubmissionID, [allocator, buffer, allocation]() {
+            vmaDestroyBuffer(allocator, buffer, allocation);
+        }});
     }
 }

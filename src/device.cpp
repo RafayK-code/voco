@@ -2,10 +2,12 @@
 #include "queue.h"
 #include "retirement_queue.h"
 #include "descriptor.h"
+#include "buffer_registry.h"
 #include "utils.h"
 #include <spirv-reflect/spirv_reflect.h>
 #include <fstream>
 #include <sstream>
+#include <unordered_set>
 #ifdef VOCO_ENABLE_GLSL
 #include <shaderc/shaderc.hpp>
 #endif
@@ -38,16 +40,18 @@ namespace voco
         vkCreateDescriptorPool(m_ctx.device, &poolInfo, nullptr, &m_descriptorPool);
 
         m_queue = std::make_unique<detail::Queue>(m_ctx.device, m_ctx.computeQueue, m_ctx.computeQueueFamilyIndex);
-        m_descriptorLayoutCache = std::make_unique<detail::DescriptorLayoutCache>(m_ctx.device, m_descriptorPool);
-        m_pipelineLayoutCache = std::make_unique<detail::PipelineLayoutCache>(m_ctx.device, *m_descriptorLayoutCache);
         m_retirementQueue = std::make_unique<detail::RetirementQueue>(*m_queue);
+        m_descriptorLayoutCache = std::make_unique<detail::DescriptorLayoutCache>(m_ctx.device, m_descriptorPool, *m_retirementQueue, m_descriptorPoolMutex);
+        m_pipelineLayoutCache = std::make_unique<detail::PipelineLayoutCache>(m_ctx.device, *m_descriptorLayoutCache, *m_retirementQueue);
+        m_bufferRegistry = std::make_unique<detail::BufferRegistry>(*m_descriptorLayoutCache);
     }
 
     Device::~Device()
     {
-        m_retirementQueue.reset();
+        m_bufferRegistry.reset();
         m_pipelineLayoutCache.reset();
         m_descriptorLayoutCache.reset();
+        m_retirementQueue.reset();
         m_queue.reset();
 
         vkDestroyDescriptorPool(m_ctx.device, m_descriptorPool, nullptr);
@@ -70,16 +74,17 @@ namespace voco
 
         VkBuffer vkBuffer;
         VmaAllocation allocation;
-        VK_CHECK(vmaCreateBuffer(m_allocator, &bufferInfo, &allocInfo, &vkBuffer, &allocation, nullptr));
+        VkResult res = vmaCreateBuffer(m_allocator, &bufferInfo, &allocInfo, &vkBuffer, &allocation, nullptr);
+        VK_CHECK(res);
 
-        return Buffer(m_allocator, m_retirementQueue.get(), vkBuffer, allocation, size, usage, memType);
+        return Buffer(m_allocator, m_retirementQueue.get(), m_bufferRegistry.get(), vkBuffer, allocation, size, usage, memType);
     }
 
     CommandList Device::createCommandList()
     {
         detail::TrackedCommandBuffer cmdBuf = m_queue->acquire();
 
-        return CommandList(m_ctx.device, std::move(cmdBuf), m_descriptorLayoutCache.get(), m_queue->getLastFinishedID());
+        return CommandList(m_ctx.device, std::move(cmdBuf), m_descriptorLayoutCache.get(), m_bufferRegistry.get(), m_queue->getLastFinishedID());
     }
 
     ComputePipeline Device::createComputePipeline(std::string_view shaderPath, ShaderSourceType sourceType)
@@ -182,7 +187,8 @@ namespace voco
         shaderInfo.pCode = spirv.data();
 
         VkShaderModule shaderModule;
-        VK_CHECK(vkCreateShaderModule(m_ctx.device, &shaderInfo, nullptr, &shaderModule));
+        VkResult res = vkCreateShaderModule(m_ctx.device, &shaderInfo, nullptr, &shaderModule);
+        VK_CHECK(res);
 
         VkComputePipelineCreateInfo pipelineInfo{};
         pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
@@ -193,7 +199,8 @@ namespace voco
         pipelineInfo.layout = pipelineLayout;
 
         VkPipeline pipeline;
-        VK_CHECK(vkCreateComputePipelines(m_ctx.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
+        res = vkCreateComputePipelines(m_ctx.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline);
+        VK_CHECK(res);
 
         ComputePipeline result;
         result.m_device = m_ctx.device;
@@ -225,8 +232,21 @@ namespace voco
         for (auto& bb : cmd.m_boundBuffers)
             bb.buffer->m_lastSubmissionID = submissionID;
 
-        if (cmd.m_pipeline)
-            cmd.m_pipeline->m_lastSubmissionID = submissionID;
+        std::unordered_set<VkPipelineLayout> usedLayouts;
+        for (auto* pipeline : cmd.m_boundPipelines)
+        {
+            pipeline->m_lastSubmissionID = submissionID;
+            VkPipelineLayout layout = pipeline->pipelineLayout();
+            if (usedLayouts.insert(layout).second)
+                m_pipelineLayoutCache->markSubmitted(layout, submissionID);
+        }
+
+        for (auto& used : cmd.m_usedSets)
+        {
+            detail::DescriptorSetKey key;
+            key.bindings = used.key;
+            used.cache->markSubmitted(key, submissionID);
+        }
     }
 
     static std::pair<VkBuffer, VmaAllocation> allocStaging(VmaAllocator allocator, VkDeviceSize size, bool forRead, void** outMapped)
@@ -246,7 +266,10 @@ namespace voco
         VkBuffer buffer;
         VmaAllocation allocation;
         VmaAllocationInfo info{};
-        VK_CHECK(vmaCreateBuffer(allocator, &bufInfo, &allocInfo, &buffer, &allocation, &info));
+
+        VkResult res = vmaCreateBuffer(allocator, &bufInfo, &allocInfo, &buffer, &allocation, &info);
+        VK_CHECK(res);
+
         *outMapped = info.pMappedData;
         return { buffer, allocation };
     }
@@ -335,7 +358,8 @@ namespace voco
     void Device::copyToDeviceMapped(const void* src, VkBuffer dst, VmaAllocation allocation, VkDeviceSize dstOffset, VkDeviceSize size)
     {
         void* mapped;
-        VK_CHECK(vmaMapMemory(m_allocator, allocation, &mapped));
+        VkResult res = vmaMapMemory(m_allocator, allocation, &mapped);
+        VK_CHECK(res);
         memcpy(static_cast<uint8_t*>(mapped) + dstOffset, src, size);
         vmaUnmapMemory(m_allocator, allocation);
         vmaFlushAllocation(m_allocator, allocation, dstOffset, size);
@@ -345,7 +369,8 @@ namespace voco
     {
         vmaInvalidateAllocation(m_allocator, allocation, srcOffset, size);
         void* mapped;
-        VK_CHECK(vmaMapMemory(m_allocator, allocation, &mapped));
+        VkResult res = vmaMapMemory(m_allocator, allocation, &mapped);
+        VK_CHECK(res);
         memcpy(dst, static_cast<uint8_t*>(mapped) + srcOffset, size);
         vmaUnmapMemory(m_allocator, allocation);
     }

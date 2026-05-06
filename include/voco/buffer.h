@@ -8,7 +8,11 @@ namespace voco
 {
     class Device;
 
-    namespace detail { class RetirementQueue; }
+    namespace detail
+    {
+        class RetirementQueue;
+        class BufferRegistry;
+    }
 
     class Buffer
     {
@@ -31,10 +35,14 @@ namespace voco
         friend class Device;
         friend class CommandList;
 
-        Buffer(VmaAllocator allocator, detail::RetirementQueue* retirementQueue, VkBuffer buffer,
+        Buffer(VmaAllocator allocator, detail::RetirementQueue* retirementQueue,
+               detail::BufferRegistry* bufferRegistry, VkBuffer buffer,
                VmaAllocation allocation, VkDeviceSize size, BufferUsage usage, MemoryType memType);
 
+        void destroy();
+
         detail::RetirementQueue* m_retirementQueue = nullptr;
+        detail::BufferRegistry* m_bufferRegistry = nullptr;
         VmaAllocator m_allocator = VK_NULL_HANDLE;
 
         VkBuffer m_buffer = VK_NULL_HANDLE;

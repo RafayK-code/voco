@@ -26,7 +26,12 @@ namespace voco::detail
     {
         {
             std::lock_guard<std::mutex> lock(m_retirementMutex);
-            m_pending.push_back(std::move(pending));
+
+            auto it = std::upper_bound(m_pending.begin(), m_pending.end(),pending.submissionID, [](uint64_t id, const PendingDestroy& e) {
+                return id < e.submissionID;
+            });
+
+            m_pending.insert(it, std::move(pending));
         }
         m_retirementCV.notify_one();
     }

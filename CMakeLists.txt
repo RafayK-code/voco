@@ -21,6 +21,7 @@ add_library(voco
     src/queue.cpp
     src/future.cpp
     src/retirement_queue.cpp
+    src/buffer_registry.cpp
 
     include/voco/voco.h
     include/voco/context.h
@@ -35,6 +36,7 @@ add_library(voco
     src/descriptor.h
     src/queue.h
     src/retirement_queue.h
+    src/buffer_registry.h
 )
 add_library(voco::voco ALIAS voco)
 

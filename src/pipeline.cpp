@@ -5,18 +5,7 @@ namespace voco
 {
     ComputePipeline::~ComputePipeline()
     {
-        if (m_pipeline == VK_NULL_HANDLE)
-            return;
-
-        VkDevice device = m_device;
-        VkShaderModule shaderModule = m_shaderModule;
-        VkPipelineLayout layout = m_pipelineLayout;
-        VkPipeline pipeline = m_pipeline;
-
-        m_retirementQueue->push({ m_lastSubmissionID, [device, shaderModule, layout, pipeline]() {
-            vkDestroyShaderModule(device, shaderModule, nullptr);
-            vkDestroyPipeline(device, pipeline, nullptr);
-        }});
+        destroy();
     }
 
     ComputePipeline::ComputePipeline(ComputePipeline&& other) noexcept
@@ -41,7 +30,7 @@ namespace voco
         if (this == &other)
             return *this;
 
-        this->~ComputePipeline();
+        destroy();
 
         m_device = other.m_device;
         m_retirementQueue = other.m_retirementQueue;
@@ -59,5 +48,24 @@ namespace voco
         other.m_pipeline = VK_NULL_HANDLE;
 
         return *this;
+    }
+
+    void ComputePipeline::destroy()
+    {
+        if (m_pipeline == VK_NULL_HANDLE)
+            return;
+
+        VkDevice device = m_device;
+        VkShaderModule shaderModule = m_shaderModule;
+        VkPipeline pipeline = m_pipeline;
+
+        m_device = VK_NULL_HANDLE;
+        m_shaderModule = VK_NULL_HANDLE;
+        m_pipeline = VK_NULL_HANDLE;
+
+        m_retirementQueue->push({ m_lastSubmissionID, [device, shaderModule, pipeline]() {
+            vkDestroyShaderModule(device, shaderModule, nullptr);
+            vkDestroyPipeline(device, pipeline, nullptr);
+        } });
     }
 }

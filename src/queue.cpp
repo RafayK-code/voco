@@ -18,7 +18,8 @@ namespace voco::detail
         semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
         semaphoreInfo.pNext = &semaphoreTypeInfo;
 
-        VK_CHECK(vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &m_timelineSemaphore));
+        VkResult res = vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &m_timelineSemaphore);
+        VK_CHECK(res);
     }
 
     Queue::~Queue()
@@ -50,7 +51,8 @@ namespace voco::detail
         poolInfo.queueFamilyIndex = m_queueFamilyIndex;
         poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
 
-        VK_CHECK(vkCreateCommandPool(m_device, &poolInfo, nullptr, &cb.pool));
+        VkResult res = vkCreateCommandPool(m_device, &poolInfo, nullptr, &cb.pool);
+        VK_CHECK(res);
 
         VkCommandBufferAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -58,7 +60,8 @@ namespace voco::detail
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         allocInfo.commandBufferCount = 1;
 
-        VK_CHECK(vkAllocateCommandBuffers(m_device, &allocInfo, &cb.cmd));
+        res = vkAllocateCommandBuffers(m_device, &allocInfo, &cb.cmd);
+        VK_CHECK(res);
 
         return cb;
     }
@@ -115,7 +118,8 @@ namespace voco::detail
         submitInfo.waitSemaphoreInfoCount = static_cast<uint32_t>(waitInfos.size());
         submitInfo.pWaitSemaphoreInfos = waitInfos.data();
 
-        VK_CHECK(vkQueueSubmit2(m_queue, 1, &submitInfo, VK_NULL_HANDLE));
+        VkResult res = vkQueueSubmit2(m_queue, 1, &submitInfo, VK_NULL_HANDLE);
+        VK_CHECK(res);
 
         m_waitSemaphores.clear();
         m_waitSemaphoreValues.clear();
@@ -164,8 +168,10 @@ namespace voco::detail
 
     uint64_t Queue::getLastFinishedID()
     {
-        vkGetSemaphoreCounterValue(m_device, m_timelineSemaphore, &m_lastFinishedID);
-        return m_lastFinishedID;
+        uint64_t value = 0;
+        VkResult res = vkGetSemaphoreCounterValue(m_device, m_timelineSemaphore, &value);
+        VK_CHECK(res);
+        return value;
     }
 
     void Queue::addWaitSemaphore(VkSemaphore semaphore, uint64_t value)
