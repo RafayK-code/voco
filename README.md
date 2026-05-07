@@ -33,9 +33,22 @@ Dependencies (bundled under `external/`):
 
 Optional: Vulkan SDK with `shaderc_combined` for runtime GLSL compilation (`-DVOCO_ENABLE_GLSL=ON`)
 
-## Building
+## Getting started
 
-voco uses CMake and can be built with any compiler that supports C++23. Configure and build with:
+voco is built as a static library and can be linked into any program. The recommended way to integrate it is via CMake's `add_subdirectory`. voco can be built with any compiler that supports C++23. Clone or copy voco into your project tree, then in your `CMakeLists.txt`:
+
+```cmake
+add_subdirectory(voco)
+target_link_libraries(your_target PRIVATE voco)
+```
+
+Include directories are propagated automatically through the `voco` target. The entire API is then accessible via a single include:
+
+```cpp
+#include <voco/voco.h>
+```
+
+To build voco standalone:
 
 ```bash
 cmake -B build
@@ -48,20 +61,9 @@ GLSL runtime compilation is off by default. Enable it if you have the Vulkan SDK
 cmake -B build -DVOCO_ENABLE_GLSL=ON
 ```
 
-## Integration
+## Usage
 
-The recommended way to integrate voco is via CMake's `add_subdirectory`. Clone or copy voco into your project tree, then in your `CMakeLists.txt`:
-
-```cmake
-add_subdirectory(voco)
-target_link_libraries(your_target PRIVATE voco)
-```
-
-Include directories are propagated automatically through the `voco` target.
-
-### Vulkan context
-
-voco does not create the Vulkan instance or device. Fill in a `voco::Context` from your existing setup:
+voco fits into an existing Vulkan application rather than owning the setup. Instance creation, physical device selection, and extension management are yours to control. Pass your existing handles into a `voco::Context` to create a `voco::Device`:
 
 ```cpp
 voco::Context ctx{};
