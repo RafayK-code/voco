@@ -35,16 +35,31 @@ Optional: Vulkan SDK with `shaderc_combined` for runtime GLSL compilation (`-DVO
 
 ## Building
 
+voco uses CMake and can be built with any compiler that supports C++23. Configure and build with:
+
 ```bash
-cmake -B build -DVOCO_ENABLE_GLSL=ON
+cmake -B build
 cmake --build build
 ```
 
+GLSL runtime compilation is off by default. Enable it if you have the Vulkan SDK and want to pass `.glsl` source directly:
+
 ```bash
-./build/tests/voco_tests
+cmake -B build -DVOCO_ENABLE_GLSL=ON
 ```
 
 ## Integration
+
+The recommended way to integrate voco is via CMake's `add_subdirectory`. Clone or copy voco into your project tree, then in your `CMakeLists.txt`:
+
+```cmake
+add_subdirectory(voco)
+target_link_libraries(your_target PRIVATE voco)
+```
+
+Include directories are propagated automatically through the `voco` target.
+
+### Vulkan context
 
 voco does not create the Vulkan instance or device. Fill in a `voco::Context` from your existing setup:
 
