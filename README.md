@@ -158,9 +158,15 @@ cmd.dispatch(1, 1, 1);
 
 Cross-submission hazards are detected in `Device::submit`. If a bound buffer is still in-flight from a previous submission, a timeline semaphore wait is added before the new submission goes to the queue.
 
-## Multiple descriptor sets
+## Descriptor sets
 
-Sets not rebound between dispatches remain bound from the previous dispatch, following the standard Vulkan descriptor set model. A common pattern is pinning shared resources like a UBO or lookup table to set A, then swapping only set B per dispatch or across pipeline switches.
+voco manages descriptor sets automatically. When you call `bindBuffer` and then `dispatch`, voco looks up a descriptor set matching the exact combination of buffers and bindings you have bound. If one exists and the GPU has finished using it, it is reused. If not, a new one is allocated and written. Each descriptor set is written once when allocated and reused on subsequent dispatches once the GPU has finished with it. If the set is still in use by the GPU, a new one is allocated for that submission. Sets are freed when the buffers they reference are destroyed.
+
+This means you pay no allocation or write cost on repeated dispatches with the same inputs, and you never touch `VkDescriptorPool`, `VkDescriptorSetLayout`, or `vkUpdateDescriptorSets` directly.
+
+### Multiple descriptor sets
+
+Sets not rebound between dispatches remain bound from the previous dispatch, following the standard Vulkan descriptor set model. A common pattern is pinning shared resources like a UBO or lookup table to set 0, then swapping only set 1 per dispatch or across pipeline switches.
 
 ```cpp
 cmd.bindBuffer(0, 0, inputBuf,  voco::Access::Read);
