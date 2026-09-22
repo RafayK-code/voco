@@ -1,60 +1,117 @@
 #include <voco/device.h>
 #include "queue.h"
 #include "retirement_queue.h"
-#include "descriptor.h"
-#include "buffer_registry.h"
+#include "descriptor_heap_backend.h"
 #include "utils.h"
 #include <spirv-reflect/spirv_reflect.h>
+#include <cstring>
 #include <fstream>
 #include <sstream>
-#include <unordered_set>
 #ifdef VOCO_ENABLE_GLSL
 #include <shaderc/shaderc.hpp>
 #endif
 
 namespace voco
 {
+    namespace
+    {
+        bool extensionEnabled(const std::vector<const char*>& list, const char* name)
+        {
+            for (const char* e : list)
+                if (std::strcmp(e, name) == 0)
+                    return true;
+            return false;
+        }
+
+        // Best-effort fail-fast: Vulkan can only report supported features, not enabled
+        // ones, so a supported-but-not-enabled feature still trips VK_CHECK later.
+        void verifyRequiredFeatures(VkPhysicalDevice physicalDevice)
+        {
+            VkPhysicalDeviceDescriptorHeapFeaturesEXT featuresHeap{};
+            featuresHeap.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT;
+
+            VkPhysicalDeviceVulkan13Features features13{};
+            features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+            features13.pNext = &featuresHeap;
+
+            VkPhysicalDeviceVulkan12Features features12{};
+            features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+            features12.pNext = &features13;
+
+            VkPhysicalDeviceFeatures2 features2{};
+            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2.pNext = &features12;
+
+            vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
+
+            DEBUG_ASSERT(features12.timelineSemaphore,
+                         "voco requires a device that supports timelineSemaphore");
+            DEBUG_ASSERT(features13.synchronization2,
+                         "voco requires a device that supports synchronization2");
+            DEBUG_ASSERT(features12.bufferDeviceAddress,
+                         "voco requires a device that supports bufferDeviceAddress");
+            DEBUG_ASSERT(featuresHeap.descriptorHeap,
+                         "voco requires a device that supports VK_EXT_descriptor_heap's descriptorHeap feature");
+        }
+
+        detail::HeapLimits queryDescriptorHeapLimits(VkPhysicalDevice physicalDevice)
+        {
+            VkPhysicalDeviceDescriptorHeapPropertiesEXT heapProps{};
+            heapProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT;
+
+            VkPhysicalDeviceProperties2 props2{};
+            props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            props2.pNext = &heapProps;
+
+            vkGetPhysicalDeviceProperties2(physicalDevice, &props2);
+
+            return {
+                heapProps.bufferDescriptorSize,
+                heapProps.bufferDescriptorAlignment,
+                heapProps.resourceHeapAlignment,
+                heapProps.minResourceHeapReservedRange,
+                heapProps.maxPushDataSize
+            };
+        }
+    }
+
     Device::Device(const Context& context)
         : m_ctx(context)
     {
+        verifyRequiredFeatures(m_ctx.physicalDevice);
+
+        const bool wantHeap = extensionEnabled(m_ctx.enabledDeviceExtensions, VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME);
+        DEBUG_ASSERT(wantHeap, "voco requires VK_EXT_descriptor_heap to be enabled on the device");
+
         VmaAllocatorCreateInfo allocatorInfo{};
         allocatorInfo.instance = m_ctx.instance;
         allocatorInfo.physicalDevice = m_ctx.physicalDevice;
         allocatorInfo.device = m_ctx.device;
         allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_4;
+        // Every buffer voco creates now carries VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+        // (needed for the descriptor heap), which VMA requires this flag for.
+        allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 
         vmaCreateAllocator(&allocatorInfo, &m_allocator);
 
-        VkDescriptorPoolSize poolSizes[] = {
-            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000 },
-            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000 },
-        };
-
-        VkDescriptorPoolCreateInfo poolInfo{};
-        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        poolInfo.maxSets = 1000;
-        poolInfo.poolSizeCount = 2;
-        poolInfo.pPoolSizes = poolSizes;
-
-        vkCreateDescriptorPool(m_ctx.device, &poolInfo, nullptr, &m_descriptorPool);
-
         m_queue = std::make_unique<detail::Queue>(m_ctx.device, m_ctx.computeQueue, m_ctx.computeQueueFamilyIndex);
         m_retirementQueue = std::make_unique<detail::RetirementQueue>(*m_queue);
-        m_descriptorLayoutCache = std::make_unique<detail::DescriptorLayoutCache>(m_ctx.device, m_descriptorPool, *m_retirementQueue, m_descriptorPoolMutex);
-        m_pipelineLayoutCache = std::make_unique<detail::PipelineLayoutCache>(m_ctx.device, *m_descriptorLayoutCache, *m_retirementQueue);
-        m_bufferRegistry = std::make_unique<detail::BufferRegistry>(*m_descriptorLayoutCache);
+
+        m_heap = std::make_unique<detail::DescriptorHeapBackend>(
+            m_ctx.device, m_allocator, queryDescriptorHeapLimits(m_ctx.physicalDevice), *m_retirementQueue);
     }
 
     Device::~Device()
     {
-        m_bufferRegistry.reset();
-        m_pipelineLayoutCache.reset();
-        m_descriptorLayoutCache.reset();
+        // The retirement queue's destructor waits for all submitted GPU work to finish
+        // and runs every pending callback -- including the heap backend's chunk-reclaim
+        // callbacks, which capture a raw HeapChunk* back into m_heap -- before
+        // returning. So m_heap must outlive that drain: destroy the retirement queue
+        // first, then the heap backend can safely destroy every chunk unconditionally.
         m_retirementQueue.reset();
+        m_heap.reset();
         m_queue.reset();
 
-        vkDestroyDescriptorPool(m_ctx.device, m_descriptorPool, nullptr);
         vmaDestroyAllocator(m_allocator);
     }
 
@@ -65,7 +122,7 @@ namespace voco
         VkBufferCreateInfo bufferInfo{};
         bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bufferInfo.size = size;
-        bufferInfo.usage = static_cast<VkBufferUsageFlags>(usage);
+        bufferInfo.usage = static_cast<VkBufferUsageFlags>(usage) | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
         VmaAllocationCreateInfo allocInfo{};
@@ -77,14 +134,19 @@ namespace voco
         VkResult res = vmaCreateBuffer(m_allocator, &bufferInfo, &allocInfo, &vkBuffer, &allocation, nullptr);
         VK_CHECK(res);
 
-        return Buffer(m_allocator, m_retirementQueue.get(), m_bufferRegistry.get(), vkBuffer, allocation, size, usage, memType);
+        VkBufferDeviceAddressInfo addrInfo{};
+        addrInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+        addrInfo.buffer = vkBuffer;
+        VkDeviceAddress deviceAddress = vkGetBufferDeviceAddress(m_ctx.device, &addrInfo);
+
+        return Buffer(m_allocator, m_retirementQueue.get(), vkBuffer, allocation, size, deviceAddress, usage, memType);
     }
 
     CommandList Device::createCommandList()
     {
         detail::TrackedCommandBuffer cmdBuf = m_queue->acquire();
 
-        return CommandList(m_ctx.device, std::move(cmdBuf), m_descriptorLayoutCache.get(), m_bufferRegistry.get(), m_queue->getLastFinishedID());
+        return CommandList(std::move(cmdBuf), m_queue.get(), m_heap.get(), &m_cacheMutex);
     }
 
     ComputePipeline Device::createComputePipeline(std::string_view shaderPath, ShaderSourceType sourceType)
@@ -143,43 +205,72 @@ namespace voco
         if (setCount > 0)
             spvReflectEnumerateDescriptorSets(&reflModule, &setCount, reflSets.data());
 
-        uint32_t maxSet = 0;
-        for (auto* s : reflSets)
-            maxSet = std::max(maxSet, s->set);
-        uint32_t totalSets = setCount > 0 ? maxSet + 1 : 0;
-
-        std::vector<VkDescriptorSetLayout> setLayouts(totalSets);
-        std::vector<std::vector<detail::BindingDesc>> allBindings(totalSets);
-
-        for (auto* reflSet : reflSets)
-        {
-            std::vector<detail::BindingDesc> bindings;
-            for (uint32_t i = 0; i < reflSet->binding_count; ++i)
-            {
-                auto* b = reflSet->bindings[i];
-                bindings.push_back({
-                    .binding = b->binding,
-                    .type = static_cast<VkDescriptorType>(b->descriptor_type),
-                    .stages = VK_SHADER_STAGE_COMPUTE_BIT
-                });
-            }
-            setLayouts[reflSet->set] = m_descriptorLayoutCache->getOrCreate(bindings).layout;
-            allBindings[reflSet->set] = std::move(bindings);
-        }
-
         uint32_t pushConstSize = 0;
         if (reflModule.push_constant_block_count > 0)
             pushConstSize = reflModule.push_constant_blocks[0].size;
 
+        uint32_t bindingCount = 0;
+        for (auto* reflSet : reflSets)
+            bindingCount += reflSet->binding_count;
+
+        const detail::HeapLimits& heapLimits = m_heap->limits();
+        const uint32_t indexTableOffset = detail::alignUp(pushConstSize, 4u);
+        DEBUG_ASSERT(indexTableOffset + bindingCount * sizeof(uint32_t) <= heapLimits.maxPushDataSize,
+                     "shader has too many buffer bindings to fit voco's push-data index table");
+
+        // Every (set,binding) maps to a push-data index -- the shader reads the actual
+        // heap slot for a dispatch's binding from push data, not a fixed heap offset.
+        // See src/descriptor_heap_backend.h for why a fixed offset can't work here.
+        std::vector<ComputePipeline::BindingMapEntry> bindingMap;
+        std::vector<VkDescriptorSetAndBindingMappingEXT> mappings;
+        bindingMap.reserve(bindingCount);
+        mappings.reserve(bindingCount);
+
+        uint32_t nextPushOffset = indexTableOffset;
+        for (auto* reflSet : reflSets)
+        {
+            for (uint32_t i = 0; i < reflSet->binding_count; ++i)
+            {
+                auto* b = reflSet->bindings[i];
+                VkDescriptorType type = static_cast<VkDescriptorType>(b->descriptor_type);
+                uint32_t pushOffset = nextPushOffset;
+                nextPushOffset += static_cast<uint32_t>(sizeof(uint32_t));
+
+                bindingMap.push_back({ reflSet->set, b->binding, pushOffset, type });
+
+                VkDescriptorMappingSourcePushIndexEXT src{};
+                src.heapOffset = 0; // indices are relative to whichever chunk is bound
+                src.pushOffset = pushOffset;
+                src.heapIndexStride = static_cast<uint32_t>(m_heap->slotStride());
+                src.heapArrayStride = 0;
+                src.pEmbeddedSampler = nullptr;
+                src.useCombinedImageSamplerIndex = VK_FALSE;
+                src.samplerHeapOffset = 0;
+                src.samplerPushOffset = 0;
+                src.samplerHeapIndexStride = 0;
+                src.samplerHeapArrayStride = 0;
+
+                VkDescriptorSetAndBindingMappingEXT mapping{};
+                mapping.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT;
+                mapping.descriptorSet = reflSet->set;
+                mapping.firstBinding = b->binding;
+                mapping.bindingCount = 1;
+                mapping.resourceMask = (type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+                    ? VK_SPIRV_RESOURCE_TYPE_UNIFORM_BUFFER_BIT_EXT
+                    : (VK_SPIRV_RESOURCE_TYPE_READ_ONLY_STORAGE_BUFFER_BIT_EXT | VK_SPIRV_RESOURCE_TYPE_READ_WRITE_STORAGE_BUFFER_BIT_EXT);
+                mapping.source = VK_DESCRIPTOR_MAPPING_SOURCE_HEAP_WITH_PUSH_INDEX_EXT;
+                mapping.sourceData.pushIndex = src;
+
+                mappings.push_back(mapping);
+            }
+        }
+
         spvReflectDestroyShaderModule(&reflModule);
 
-        VkPushConstantRange pcRange{};
-        pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        pcRange.offset = 0;
-        pcRange.size = pushConstSize;
-
-        VkPipelineLayout pipelineLayout = m_pipelineLayoutCache->getOrCreate(
-            allBindings, pushConstSize > 0 ? std::optional(pcRange) : std::nullopt);
+        VkShaderDescriptorSetAndBindingMappingInfoEXT mappingInfo{};
+        mappingInfo.sType = VK_STRUCTURE_TYPE_SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT;
+        mappingInfo.mappingCount = static_cast<uint32_t>(mappings.size());
+        mappingInfo.pMappings = mappings.data();
 
         VkShaderModuleCreateInfo shaderInfo{};
         shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -190,13 +281,19 @@ namespace voco
         VkResult res = vkCreateShaderModule(m_ctx.device, &shaderInfo, nullptr, &shaderModule);
         VK_CHECK(res);
 
+        VkPipelineCreateFlags2CreateInfo flags2Info{};
+        flags2Info.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO;
+        flags2Info.flags = VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT;
+
         VkComputePipelineCreateInfo pipelineInfo{};
         pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineInfo.pNext = &flags2Info;
         pipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        pipelineInfo.stage.pNext = &mappingInfo;
         pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
         pipelineInfo.stage.module = shaderModule;
         pipelineInfo.stage.pName = "main";
-        pipelineInfo.layout = pipelineLayout;
+        pipelineInfo.layout = VK_NULL_HANDLE; // required for VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT
 
         VkPipeline pipeline;
         res = vkCreateComputePipelines(m_ctx.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline);
@@ -206,10 +303,8 @@ namespace voco
         result.m_device = m_ctx.device;
         result.m_retirementQueue = m_retirementQueue.get();
         result.m_shaderModule = shaderModule;
-        result.m_descSetLayouts = std::move(setLayouts);
-        result.m_pipelineLayout = pipelineLayout;
         result.m_pipeline = pipeline;
-        result.m_pushConstSize = pushConstSize;
+        result.m_bindingMap = std::move(bindingMap);
         return result;
     }
 
@@ -225,27 +320,20 @@ namespace voco
         if (maxHazardID > 0)
             m_queue->addWaitSemaphore(m_queue->getTimelineSemaphore(), maxHazardID);
 
-        vkEndCommandBuffer(cmd.m_cmdBuf->cmd);
+        VK_CHECK(vkEndCommandBuffer(cmd.m_cmdBuf->cmd));
         uint64_t submissionID = m_queue->submit(std::move(*cmd.m_cmdBuf));
         cmd.m_cmdBuf.reset();
 
         for (auto& bb : cmd.m_boundBuffers)
             bb.buffer->m_lastSubmissionID = submissionID;
 
-        std::unordered_set<VkPipelineLayout> usedLayouts;
-        for (auto* pipeline : cmd.m_boundPipelines)
         {
-            pipeline->m_lastSubmissionID = submissionID;
-            VkPipelineLayout layout = pipeline->pipelineLayout();
-            if (usedLayouts.insert(layout).second)
-                m_pipelineLayoutCache->markSubmitted(layout, submissionID);
-        }
+            std::lock_guard<std::mutex> cacheLock(m_cacheMutex);
 
-        for (auto& used : cmd.m_usedSets)
-        {
-            detail::DescriptorSetKey key;
-            key.bindings = used.key;
-            used.cache->markSubmitted(key, submissionID);
+            for (auto* pipeline : cmd.m_boundPipelines)
+                pipeline->m_lastSubmissionID = submissionID;
+
+            m_heap->onSubmitted(cmd.m_touchedChunks, submissionID);
         }
     }
 
@@ -282,7 +370,7 @@ namespace voco
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(cb.cmd, &beginInfo);
+        VK_CHECK(vkBeginCommandBuffer(cb.cmd, &beginInfo));
 
         VkBufferCopy region{};
         region.srcOffset = srcOffset;
@@ -290,7 +378,7 @@ namespace voco
         region.size = size;
         vkCmdCopyBuffer(cb.cmd, src, dst, 1, &region);
 
-        vkEndCommandBuffer(cb.cmd);
+        VK_CHECK(vkEndCommandBuffer(cb.cmd));
         return queue.submit(std::move(cb));
     }
 

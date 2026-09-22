@@ -1,6 +1,7 @@
 #include "test_context.h"
 #include <vulkan/vulkan.h>
 #include <vector>
+#include <iterator>
 #include <cstdio>
 
 TestContext* g_ctx = nullptr;
@@ -101,20 +102,30 @@ TestContext::TestContext()
     queueInfo.queueCount = 1;
     queueInfo.pQueuePriorities = &queuePriority;
 
+    VkPhysicalDeviceDescriptorHeapFeaturesEXT featuresHeap{};
+    featuresHeap.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT;
+    featuresHeap.descriptorHeap = VK_TRUE;
+
     VkPhysicalDeviceVulkan12Features features12{};
     features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     features12.timelineSemaphore = VK_TRUE;
+    features12.bufferDeviceAddress = VK_TRUE;
+    features12.pNext = &featuresHeap;
 
     VkPhysicalDeviceVulkan13Features features13{};
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     features13.synchronization2 = VK_TRUE;
     features13.pNext = &features12;
 
+    const char* deviceExtensions[] = { VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME };
+
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.pNext = &features13;
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueInfo;
+    deviceInfo.enabledExtensionCount = 1;
+    deviceInfo.ppEnabledExtensionNames = deviceExtensions;
 
     vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &m_vkDevice);
 
@@ -127,6 +138,7 @@ TestContext::TestContext()
     ctx.device = m_vkDevice;
     ctx.computeQueue = computeQueue;
     ctx.computeQueueFamilyIndex = computeFamily;
+    ctx.enabledDeviceExtensions.assign(std::begin(deviceExtensions), std::end(deviceExtensions));
 
     m_device = std::make_unique<voco::Device>(ctx);
 }

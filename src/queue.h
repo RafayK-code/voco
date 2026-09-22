@@ -26,6 +26,9 @@ namespace voco::detail
         TrackedCommandBuffer acquire();
         uint64_t submit(TrackedCommandBuffer cb);
 
+        // Returns a never-submitted command buffer to the pool.
+        void release(TrackedCommandBuffer cb);
+
         // called on submit
         void retire();
 

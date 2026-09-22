@@ -11,7 +11,6 @@ namespace voco
     namespace detail
     {
         class RetirementQueue;
-        class BufferRegistry;
     }
 
     class Buffer
@@ -21,12 +20,13 @@ namespace voco
 
         Buffer(const Buffer&) = delete;
         Buffer& operator=(const Buffer&) = delete;
-        
+
         Buffer(Buffer&&) noexcept;
         Buffer& operator=(Buffer&&) noexcept;
 
         VkBuffer handle() const { return m_buffer; }
         VkDeviceSize size() const { return m_size; }
+        VkDeviceAddress deviceAddress() const { return m_deviceAddress; }
         MemoryType memoryType() const { return m_memoryType; }
         bool isHostVisible() const { return m_memoryType == MemoryType::Host || m_memoryType == MemoryType::Unified; }
         bool valid() const { return m_buffer != VK_NULL_HANDLE; }
@@ -35,19 +35,19 @@ namespace voco
         friend class Device;
         friend class CommandList;
 
-        Buffer(VmaAllocator allocator, detail::RetirementQueue* retirementQueue,
-               detail::BufferRegistry* bufferRegistry, VkBuffer buffer,
-               VmaAllocation allocation, VkDeviceSize size, BufferUsage usage, MemoryType memType);
+        Buffer(VmaAllocator allocator, detail::RetirementQueue* retirementQueue, VkBuffer buffer,
+               VmaAllocation allocation, VkDeviceSize size, VkDeviceAddress deviceAddress,
+               BufferUsage usage, MemoryType memType);
 
         void destroy();
 
         detail::RetirementQueue* m_retirementQueue = nullptr;
-        detail::BufferRegistry* m_bufferRegistry = nullptr;
         VmaAllocator m_allocator = VK_NULL_HANDLE;
 
         VkBuffer m_buffer = VK_NULL_HANDLE;
         VmaAllocation m_allocation = VK_NULL_HANDLE;
         VkDeviceSize m_size = 0;
+        VkDeviceAddress m_deviceAddress = 0;
 
         BufferUsage m_usage = BufferUsage::None;
         MemoryType m_memoryType = MemoryType::Device;

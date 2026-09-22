@@ -9,10 +9,16 @@
     #define DEBUG_ASSERT(expr, msg) assert((expr) && (msg))
 #endif
 
-#define VK_CHECK(res) DEBUG_ASSERT((res) == VK_SUCCESS, "Vulkan call failed")
+#define VK_CHECK(expr) do { VkResult _vk_res = (expr); DEBUG_ASSERT(_vk_res == VK_SUCCESS, "Vulkan call failed"); (void)_vk_res; } while(0)
 
 namespace voco::detail
 {
+    template<typename T>
+    inline constexpr T alignUp(T value, T alignment)
+    {
+        return alignment == 0 ? value : (value + alignment - 1) / alignment * alignment;
+    }
+
     inline constexpr VkAccessFlags2 ConvertAccessToVulkanAccessFlags2(Access access)
     {
         switch (access)

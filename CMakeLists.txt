@@ -17,11 +17,10 @@ add_library(voco
     src/buffer.cpp
     src/pipeline.cpp
     src/command_list.cpp
-    src/descriptor.cpp
+    src/descriptor_heap_backend.cpp
     src/queue.cpp
     src/future.cpp
     src/retirement_queue.cpp
-    src/buffer_registry.cpp
 
     include/voco/voco.h
     include/voco/context.h
@@ -33,10 +32,9 @@ add_library(voco
     include/voco/device.h
 
     src/utils.h
-    src/descriptor.h
+    src/descriptor_heap_backend.h
     src/queue.h
     src/retirement_queue.h
-    src/buffer_registry.h
 )
 add_library(voco::voco ALIAS voco)
 

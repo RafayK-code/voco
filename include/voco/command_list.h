@@ -1,8 +1,9 @@
 #pragma once
 #include <vulkan/vulkan.h>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <vector>
-#include <unordered_map>
 #include "types.h"
 #include "buffer.h"
 #include "pipeline.h"
@@ -12,9 +13,9 @@ namespace voco
     namespace detail
     {
         struct TrackedCommandBuffer;
-        class DescriptorLayoutCache;
-        class DescriptorSetCache;
-        class BufferRegistry;
+        class Queue;
+        class DescriptorHeapBackend;
+        struct HeapChunk;
     }
 
     class CommandList
@@ -26,7 +27,7 @@ namespace voco
         CommandList& operator=(const CommandList&) = delete;
 
         CommandList(CommandList&&) noexcept = default;
-        CommandList& operator=(CommandList&&) noexcept = default;
+        CommandList& operator=(CommandList&&) noexcept;
 
         void bindPipeline(ComputePipeline& pipeline);
         void bindBuffer(uint32_t set, uint32_t binding, Buffer& buffer, Access access = Access::ReadWrite);
@@ -42,20 +43,24 @@ namespace voco
     private:
         friend class Device;
 
-        CommandList(VkDevice device, detail::TrackedCommandBuffer cmdBuf,
-                    detail::DescriptorLayoutCache* layoutCache, detail::BufferRegistry* bufferRegistry,
-                    uint64_t lastFinishedID);
+        CommandList(detail::TrackedCommandBuffer cmdBuf, detail::Queue* queue,
+                    detail::DescriptorHeapBackend* heap, std::mutex* cacheMutex);
 
         void setPushConstantsImpl(const void* data, uint32_t size);
 
-        VkDevice m_device = VK_NULL_HANDLE;
-        detail::DescriptorLayoutCache* m_layoutCache = nullptr;
-        detail::BufferRegistry* m_bufferRegistry = nullptr;
-        uint64_t m_lastFinishedID = 0;
+        // Returns the command buffer and heap chunks of a never-submitted list.
+        void releaseUnsubmitted();
+
+        detail::Queue* m_queue = nullptr;
+        detail::DescriptorHeapBackend* m_heap = nullptr;
+        std::mutex* m_cacheMutex = nullptr;
+        detail::HeapChunk* m_activeChunk = nullptr;
+        std::vector<detail::HeapChunk*> m_touchedChunks;
 
         std::unique_ptr<detail::TrackedCommandBuffer> m_cmdBuf;
 
         ComputePipeline* m_pipeline = nullptr;
+        bool m_pipelineChanged = false;
         std::vector<ComputePipeline*> m_boundPipelines;
 
         struct BoundBuffer
@@ -66,26 +71,16 @@ namespace voco
             Access access;
         };
 
-        struct PendingBinding
+        // Current buffer at a (set,binding). Persists across dispatches until rebound;
+        // `dirty` marks bindings changed since the last dispatch.
+        struct BoundBinding
         {
-            uint32_t binding = 0;
             uint32_t bufferIndex = 0;
             VkDescriptorType type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        };
-
-        struct PendingSet
-        {
-            std::unordered_map<uint32_t, PendingBinding> bindings;
-        };
-
-        struct UsedSet
-        {
-            detail::DescriptorSetCache* cache;
-            std::vector<std::pair<uint32_t, VkBuffer>> key;
+            bool dirty = true;
         };
 
         std::vector<BoundBuffer> m_boundBuffers;
-        std::unordered_map<uint32_t, PendingSet> m_pendingSets;
-        std::vector<UsedSet> m_usedSets;
+        std::map<std::pair<uint32_t, uint32_t>, BoundBinding> m_bindings;
     };
 } // namespace voco

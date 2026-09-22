@@ -13,15 +13,12 @@ namespace voco
         , m_retirementQueue(other.m_retirementQueue)
         , m_lastSubmissionID(other.m_lastSubmissionID)
         , m_shaderModule(other.m_shaderModule)
-        , m_descSetLayouts(std::move(other.m_descSetLayouts))
-        , m_pipelineLayout(other.m_pipelineLayout)
         , m_pipeline(other.m_pipeline)
-        , m_pushConstSize(other.m_pushConstSize)
+        , m_bindingMap(std::move(other.m_bindingMap))
     {
         other.m_device = VK_NULL_HANDLE;
         other.m_retirementQueue = nullptr;
         other.m_shaderModule = VK_NULL_HANDLE;
-        other.m_pipelineLayout = VK_NULL_HANDLE;
         other.m_pipeline = VK_NULL_HANDLE;
     }
 
@@ -36,18 +33,24 @@ namespace voco
         m_retirementQueue = other.m_retirementQueue;
         m_lastSubmissionID = other.m_lastSubmissionID;
         m_shaderModule = other.m_shaderModule;
-        m_descSetLayouts = std::move(other.m_descSetLayouts);
-        m_pipelineLayout = other.m_pipelineLayout;
         m_pipeline = other.m_pipeline;
-        m_pushConstSize = other.m_pushConstSize;
+        m_bindingMap = std::move(other.m_bindingMap);
 
         other.m_device = VK_NULL_HANDLE;
         other.m_retirementQueue = nullptr;
         other.m_shaderModule = VK_NULL_HANDLE;
-        other.m_pipelineLayout = VK_NULL_HANDLE;
         other.m_pipeline = VK_NULL_HANDLE;
 
         return *this;
+    }
+
+    const ComputePipeline::BindingMapEntry* ComputePipeline::findBinding(uint32_t set, uint32_t binding) const
+    {
+        for (const auto& entry : m_bindingMap)
+            if (entry.set == set && entry.binding == binding)
+                return &entry;
+
+        return nullptr;
     }
 
     void ComputePipeline::destroy()

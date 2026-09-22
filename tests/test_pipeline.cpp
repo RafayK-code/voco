@@ -60,14 +60,6 @@ TEST_CASE("pipeline creation")
     CHECK(multisetPipeline().valid());
 }
 
-TEST_CASE("pipeline layout deduplication")
-{
-    auto& dev = g_ctx->device();
-    ComputePipeline p1 = dev.createComputePipeline(SHADER("test_scale.glsl"), ShaderSourceType::GLSL);
-    ComputePipeline p2 = dev.createComputePipeline(SHADER("test_scale.glsl"), ShaderSourceType::GLSL);
-    CHECK(p1.pipelineLayout() == p2.pipelineLayout());
-}
-
 TEST_CASE("basic dispatch")
 {
     auto& dev = g_ctx->device();
@@ -238,4 +230,110 @@ TEST_CASE("multi-set bindings with per-dispatch rebind")
         CHECK(result1[i] == 5.0f);   // 2.0 * 2.0 + 1.0
         CHECK(result2[i] == 13.0f);  // 6.0 * 2.0 + 1.0
     }
+}
+
+TEST_CASE("bindings persist across dispatches without rebind")
+{
+    // buf is bound once; the later dispatches must still see it and still get a
+    // barrier against the previous dispatch's write.
+    auto& dev = g_ctx->device();
+
+    constexpr uint32_t count = 64;
+    constexpr VkDeviceSize byteSize = count * sizeof(float);
+
+    std::vector<float> zeros(count, 0.0f);
+    Buffer buf = dev.createBuffer(kStorageCopy, byteSize);
+    dev.copyToDevice(zeros.data(), buf, 0, byteSize);
+
+    CommandList cmd = dev.createCommandList();
+    cmd.bindPipeline(inplaceAddPipeline());
+    cmd.bindBuffer(0, 0, buf, Access::ReadWrite);
+    cmd.dispatch(1, 1, 1);
+    cmd.dispatch(1, 1, 1);
+    cmd.dispatch(1, 1, 1);
+    dev.submit(cmd);
+
+    std::vector<float> result(count, 0.0f);
+    dev.copyToHost(buf, result.data(), 0, byteSize);
+
+    for (uint32_t i = 0; i < count; ++i)
+        CHECK(result[i] == 3.0f);
+}
+
+TEST_CASE("bindings persist across pipeline switch")
+{
+    // multiset and scale both use set 0 bindings 0/1, but place their heap indices at
+    // different push-data offsets -- the switch must re-push them for scale.
+    auto& dev = g_ctx->device();
+
+    constexpr uint32_t count = 64;
+    constexpr VkDeviceSize byteSize = count * sizeof(float);
+
+    std::vector<float> src(count, 4.0f);
+    Buffer inBuf  = dev.createBuffer(kStorageCopy, byteSize);
+    Buffer outBuf = dev.createBuffer(kStorageCopy, byteSize);
+    dev.copyToDevice(src.data(), inBuf, 0, byteSize);
+
+    struct Params { float scale; float bias; } params{ 2.0f, 1.0f };
+    Buffer ubo = dev.createBuffer(BufferUsage::Uniform, sizeof(Params), MemoryType::Host);
+    dev.copyToDevice(&params, ubo, 0, sizeof(Params));
+
+    struct PC { float scale; } pc{ 3.0f };
+
+    CommandList cmd = dev.createCommandList();
+    cmd.bindPipeline(multisetPipeline());
+    cmd.bindBuffer(0, 0, inBuf,  Access::Read);
+    cmd.bindBuffer(0, 1, outBuf, Access::Write);
+    cmd.bindBuffer(1, 0, ubo,    Access::Read);
+    cmd.dispatch(1, 1, 1);
+
+    cmd.bindPipeline(scalePipeline());
+    cmd.setPushConstants(pc);
+    cmd.dispatch(1, 1, 1);
+    dev.submit(cmd);
+
+    std::vector<float> result(count, 0.0f);
+    dev.copyToHost(outBuf, result.data(), 0, byteSize);
+
+    for (uint32_t i = 0; i < count; ++i)
+        CHECK(result[i] == 12.0f);  // 4.0 * 3.0, second dispatch overwrites the first
+}
+
+TEST_CASE("unsubmitted command lists are recycled")
+{
+    auto& dev = g_ctx->device();
+
+    constexpr uint32_t count = 64;
+    constexpr VkDeviceSize byteSize = count * sizeof(float);
+
+    std::vector<float> zeros(count, 0.0f);
+    Buffer buf = dev.createBuffer(kStorageCopy, byteSize);
+    dev.copyToDevice(zeros.data(), buf, 0, byteSize);
+
+    for (int i = 0; i < 100; ++i)
+    {
+        CommandList dropped = dev.createCommandList();
+        dropped.bindPipeline(inplaceAddPipeline());
+        dropped.bindBuffer(0, 0, buf, Access::ReadWrite);
+        dropped.dispatch(1, 1, 1);
+    }
+
+    CommandList moved = dev.createCommandList();
+    moved.bindPipeline(inplaceAddPipeline());
+    moved.bindBuffer(0, 0, buf, Access::ReadWrite);
+    moved.dispatch(1, 1, 1);
+    moved = dev.createCommandList();  // previous recording is dropped, not leaked
+
+    CommandList cmd = dev.createCommandList();
+    cmd.bindPipeline(inplaceAddPipeline());
+    cmd.bindBuffer(0, 0, buf, Access::ReadWrite);
+    cmd.dispatch(1, 1, 1);
+    dev.submit(cmd);
+
+    std::vector<float> result(count, 0.0f);
+    dev.copyToHost(buf, result.data(), 0, byteSize);
+
+    // Only the submitted dispatch ran.
+    for (uint32_t i = 0; i < count; ++i)
+        CHECK(result[i] == 1.0f);
 }

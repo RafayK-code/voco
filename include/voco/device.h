@@ -16,9 +16,7 @@ namespace voco
     {
         class Queue;
         class RetirementQueue;
-        class DescriptorLayoutCache;
-        class PipelineLayoutCache;
-        class BufferRegistry;
+        class DescriptorHeapBackend;
     }
 
     class Device
@@ -55,13 +53,10 @@ namespace voco
 
         Context m_ctx;
         VmaAllocator m_allocator = VK_NULL_HANDLE;
-        VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
-        std::mutex m_descriptorPoolMutex;
+        std::mutex m_cacheMutex;
 
         std::unique_ptr<detail::Queue> m_queue;
         std::unique_ptr<detail::RetirementQueue> m_retirementQueue;
-        std::unique_ptr<detail::DescriptorLayoutCache> m_descriptorLayoutCache;
-        std::unique_ptr<detail::PipelineLayoutCache> m_pipelineLayoutCache;
-        std::unique_ptr<detail::BufferRegistry> m_bufferRegistry;
+        std::unique_ptr<detail::DescriptorHeapBackend> m_heap;
     };
 } // namespace voco

@@ -1,19 +1,15 @@
 #include <voco/command_list.h>
-#include <algorithm>
 #include "queue.h"
-#include "descriptor.h"
-#include "buffer_registry.h"
+#include "descriptor_heap_backend.h"
 #include "utils.h"
 
 namespace voco
 {
-    CommandList::CommandList(VkDevice device, detail::TrackedCommandBuffer cmdBuf,
-                             detail::DescriptorLayoutCache* layoutCache, detail::BufferRegistry* bufferRegistry,
-                             uint64_t lastFinishedID)
-        : m_device(device)
-        , m_layoutCache(layoutCache)
-        , m_bufferRegistry(bufferRegistry)
-        , m_lastFinishedID(lastFinishedID)
+    CommandList::CommandList(detail::TrackedCommandBuffer cmdBuf, detail::Queue* queue,
+                             detail::DescriptorHeapBackend* heap, std::mutex* cacheMutex)
+        : m_queue(queue)
+        , m_heap(heap)
+        , m_cacheMutex(cacheMutex)
         , m_cmdBuf(std::make_unique<detail::TrackedCommandBuffer>(std::move(cmdBuf)))
     {
         VkCommandBufferBeginInfo beginInfo{};
@@ -23,12 +19,56 @@ namespace voco
         VK_CHECK(res);
     }
 
-    CommandList::~CommandList() = default;
+    CommandList::~CommandList()
+    {
+        releaseUnsubmitted();
+    }
+
+    CommandList& CommandList::operator=(CommandList&& other) noexcept
+    {
+        if (this == &other)
+            return *this;
+
+        releaseUnsubmitted();
+
+        m_queue = other.m_queue;
+        m_heap = other.m_heap;
+        m_cacheMutex = other.m_cacheMutex;
+        m_activeChunk = other.m_activeChunk;
+        m_touchedChunks = std::move(other.m_touchedChunks);
+        m_cmdBuf = std::move(other.m_cmdBuf);
+        m_pipeline = other.m_pipeline;
+        m_pipelineChanged = other.m_pipelineChanged;
+        m_boundPipelines = std::move(other.m_boundPipelines);
+        m_boundBuffers = std::move(other.m_boundBuffers);
+        m_bindings = std::move(other.m_bindings);
+
+        other.m_activeChunk = nullptr;
+        other.m_touchedChunks.clear();
+
+        return *this;
+    }
+
+    void CommandList::releaseUnsubmitted()
+    {
+        // Device::submit takes m_cmdBuf, so a live one means this list never reached
+        // the GPU -- its command buffer and heap chunks can be recycled immediately.
+        if (!m_cmdBuf)
+            return;
+
+        m_queue->release(std::move(*m_cmdBuf));
+        m_cmdBuf.reset();
+
+        m_heap->releaseChunks(m_touchedChunks);
+        m_touchedChunks.clear();
+        m_activeChunk = nullptr;
+    }
 
     void CommandList::bindPipeline(ComputePipeline& pipeline)
     {
         vkCmdBindPipeline(m_cmdBuf->cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.handle());
         m_pipeline = &pipeline;
+        m_pipelineChanged = true;
         m_boundPipelines.push_back(&pipeline);
     }
 
@@ -46,12 +86,10 @@ namespace voco
         const bool isUniform =
             static_cast<int>(buffer.m_usage & BufferUsage::Uniform) != 0;
 
-        auto& pending = m_pendingSets[set];
-
-        pending.bindings[binding] = PendingBinding{
-            .binding = binding,
+        m_bindings[{ set, binding }] = BoundBinding{
             .bufferIndex = index,
-            .type = isUniform ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+            .type = isUniform ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .dirty = true
         };
     }
 
@@ -59,23 +97,41 @@ namespace voco
     {
         DEBUG_ASSERT(m_pipeline, "attempted to dispatch before binding pipeline");
 
-        bool needsBarrier = false;
+        // Every binding this dispatch reads, including ones left bound from earlier
+        // dispatches. Only dirty ones need new descriptors -- unless the pipeline
+        // changed, since each pipeline reads its heap indices from its own push-data
+        // offsets, which nothing has written yet.
+        std::vector<BoundBuffer*> used;
+        std::vector<detail::DispatchBinding> resolved;
+        used.reserve(m_bindings.size());
+        resolved.reserve(m_bindings.size());
 
-        for (auto& [set, pending] : m_pendingSets)
+        for (auto& [key, bound] : m_bindings)
         {
-            for (auto& [binding, pb] : pending.bindings)
+            const auto [set, binding] = key;
+            const ComputePipeline::BindingMapEntry* entry = m_pipeline->findBinding(set, binding);
+            if (!entry)
             {
-                BoundBuffer& bb = m_boundBuffers[pb.bufferIndex];
-
-                if (bb.buffer->m_lastAccess & VK_ACCESS_2_SHADER_WRITE_BIT)
-                {
-                    needsBarrier = true;
-                    break;
-                }
+                // Stale bindings left over from a previous pipeline are fine to skip.
+                DEBUG_ASSERT(!bound.dirty, "bound buffer has no matching binding in the shader's reflected layout");
+                continue;
             }
 
-            if (needsBarrier)
+            BoundBuffer& bb = m_boundBuffers[bound.bufferIndex];
+            used.push_back(&bb);
+
+            if (bound.dirty || m_pipelineChanged)
+                resolved.push_back({ entry->pushOffset, bb.buffer->deviceAddress(), bb.buffer->size(), bound.type });
+        }
+
+        bool needsBarrier = false;
+        for (BoundBuffer* bb : used)
+        {
+            if (bb->buffer->m_lastAccess & VK_ACCESS_2_SHADER_WRITE_BIT)
+            {
+                needsBarrier = true;
                 break;
+            }
         }
 
         if (needsBarrier)
@@ -97,144 +153,55 @@ namespace voco
             vkCmdPipelineBarrier2(m_cmdBuf->cmd, &depInfo);
         }
 
-        for (auto& [set, pending] : m_pendingSets)
+        if (!resolved.empty())
         {
-            std::vector<PendingBinding> ordered;
-            ordered.reserve(pending.bindings.size());
-
-            for (auto& [binding, pb] : pending.bindings)
-                ordered.push_back(pb);
-
-            std::sort(
-                ordered.begin(),
-                ordered.end(),
-                [](const PendingBinding& a, const PendingBinding& b)
-                {
-                    return a.binding < b.binding;
-                }
-            );
-
-            std::vector<detail::BindingDesc> bindings;
-            bindings.reserve(ordered.size());
-
-            detail::DescriptorSetKey setKey;
-            setKey.bindings.reserve(ordered.size());
-
-            for (const PendingBinding& pb : ordered)
+            detail::DescriptorHeapBackend::SlotAllocation alloc;
             {
-                BoundBuffer& bb = m_boundBuffers[pb.bufferIndex];
-
-                bindings.push_back({
-                    pb.binding,
-                    pb.type,
-                    VK_SHADER_STAGE_COMPUTE_BIT
-                    });
-
-                setKey.bindings.push_back({
-                    pb.binding,
-                    bb.buffer->handle()
-                    });
+                std::lock_guard<std::mutex> cacheLock(*m_cacheMutex);
+                alloc = m_heap->allocateSlots(m_activeChunk, static_cast<uint32_t>(resolved.size()));
             }
 
-            detail::DescriptorLayout& descLayout =
-                m_layoutCache->getOrCreate(bindings);
+            m_heap->writeDescriptors(*alloc.chunk, alloc.baseSlot, resolved);
 
-            bool needsWrite = false;
-
-            VkDescriptorSet descSet =
-                descLayout.setCache.get(setKey, m_lastFinishedID);
-
-            if (descSet == VK_NULL_HANDLE)
+            if (alloc.chunk != m_activeChunk)
             {
-                descSet = descLayout.setCache.allocate(setKey);
-                needsWrite = true;
-
-                if (m_bufferRegistry)
-                {
-                    std::vector<VkBuffer> bufferHandles;
-                    bufferHandles.reserve(ordered.size());
-
-                    for (const PendingBinding& pb : ordered)
-                    {
-                        BoundBuffer& bb = m_boundBuffers[pb.bufferIndex];
-                        bufferHandles.push_back(bb.buffer->handle());
-                    }
-
-                    m_bufferRegistry->registerRef(bufferHandles, bindings);
-                }
+                m_heap->bindHeap(m_cmdBuf->cmd, *alloc.chunk);
+                m_activeChunk = alloc.chunk;
+                m_touchedChunks.push_back(alloc.chunk);
             }
 
-            if (needsWrite)
+            // One small push per binding rather than a batched range: each binding's
+            // push-data offset was assigned independently at pipeline creation (see
+            // device.cpp), so the offsets touched by this dispatch aren't guaranteed
+            // contiguous.
+            for (size_t i = 0; i < resolved.size(); ++i)
             {
-                std::vector<VkDescriptorBufferInfo> bufferInfos(ordered.size());
-                std::vector<VkWriteDescriptorSet> writes(ordered.size());
-
-                for (size_t i = 0; i < ordered.size(); ++i)
-                {
-                    const PendingBinding& pb = ordered[i];
-                    BoundBuffer& bb = m_boundBuffers[pb.bufferIndex];
-
-                    bufferInfos[i].buffer = bb.buffer->handle();
-                    bufferInfos[i].offset = 0;
-                    bufferInfos[i].range = bb.buffer->size();
-
-                    writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                    writes[i].dstSet = descSet;
-                    writes[i].dstBinding = pb.binding;
-                    writes[i].dstArrayElement = 0;
-                    writes[i].descriptorCount = 1;
-                    writes[i].descriptorType = pb.type;
-                    writes[i].pBufferInfo = &bufferInfos[i];
-                }
-
-                vkUpdateDescriptorSets(
-                    m_device,
-                    static_cast<uint32_t>(writes.size()),
-                    writes.data(),
-                    0,
-                    nullptr
-                );
+                uint32_t index = alloc.baseSlot + static_cast<uint32_t>(i);
+                m_heap->pushData(m_cmdBuf->cmd, resolved[i].pushOffset, &index, sizeof(index));
             }
-
-            vkCmdBindDescriptorSets(
-                m_cmdBuf->cmd,
-                VK_PIPELINE_BIND_POINT_COMPUTE,
-                m_pipeline->pipelineLayout(),
-                set,
-                1,
-                &descSet,
-                0,
-                nullptr
-            );
-
-            m_usedSets.push_back({
-                &descLayout.setCache,
-                setKey.bindings
-                });
         }
 
         vkCmdDispatch(m_cmdBuf->cmd, x, y, z);
 
-        for (auto& [set, pending] : m_pendingSets)
+        for (BoundBuffer* bb : used)
         {
-            for (auto& [binding, pb] : pending.bindings)
-            {
-                BoundBuffer& bb = m_boundBuffers[pb.bufferIndex];
+            bb->buffer->m_lastAccess =
+                detail::ConvertAccessToVulkanAccessFlags2(bb->access);
 
-                bb.buffer->m_lastAccess =
-                    detail::ConvertAccessToVulkanAccessFlags2(bb.access);
-
-                bb.buffer->m_lastStage =
-                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-            }
+            bb->buffer->m_lastStage =
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         }
 
-        m_pendingSets.clear();
+        for (auto& [key, bound] : m_bindings)
+            bound.dirty = false;
+
+        m_pipelineChanged = false;
     }
 
     void CommandList::setPushConstantsImpl(const void* data, uint32_t size)
     {
         DEBUG_ASSERT(m_pipeline, "attempted to set push constants before binding pipeline");
-        vkCmdPushConstants(m_cmdBuf->cmd, m_pipeline->pipelineLayout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, size, data);
+        // offset 0 matches the reflected push-constant block's offset (always 0 today)
+        m_heap->pushData(m_cmdBuf->cmd, 0, data, size);
     }
 }

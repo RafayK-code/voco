@@ -4,6 +4,8 @@ add_executable(voco_tests
     test_buffer.cpp
     test_pipeline.cpp
     test_sync.cpp
+    test_stress.cpp
+    test_threading.cpp
 )
 
 target_link_libraries(voco_tests

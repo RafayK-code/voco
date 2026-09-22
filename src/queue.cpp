@@ -68,8 +68,6 @@ namespace voco::detail
 
     uint64_t Queue::submit(TrackedCommandBuffer cb)
     {
-        retire();
-
         cb.submissionID = ++m_lastSubmittedID;
 
         VkCommandBufferSubmitInfo cmdInfo{};
@@ -128,7 +126,17 @@ namespace voco::detail
 
         m_inFlight.push_back(std::move(cb));
 
+        retire();
+
         return m_lastSubmittedID;
+    }
+
+    void Queue::release(TrackedCommandBuffer cb)
+    {
+        VK_CHECK(vkResetCommandPool(m_device, cb.pool, 0));
+
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_pool.push_back(std::move(cb));
     }
 
     void Queue::retire()
@@ -140,7 +148,7 @@ namespace voco::detail
         {
             if (it->submissionID <= completed)
             {
-                vkResetCommandPool(m_device, it->pool, 0);
+                VK_CHECK(vkResetCommandPool(m_device, it->pool, 0));
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
                     m_pool.push_back(std::move(*it));
@@ -163,7 +171,7 @@ namespace voco::detail
         waitInfo.pSemaphores = &m_timelineSemaphore;
         waitInfo.pValues = &value;
 
-        vkWaitSemaphores(m_device, &waitInfo, std::numeric_limits<uint64_t>::max());
+        VK_CHECK(vkWaitSemaphores(m_device, &waitInfo, std::numeric_limits<uint64_t>::max()));
     }
 
     uint64_t Queue::getLastFinishedID()
